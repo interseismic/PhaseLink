@@ -1,213 +1,191 @@
-#! /bin/env python
+#! /home/zross/bin python
+
 import numpy as np
 import multiprocessing as mp
 import pickle
+import sys
 import json
+from obspy.geodetics.base import gps2dist_azimuth
 
-#np.random.seed(42)
-
-#SOCAL
-bounds_scaler = 2
-n_chunk = 1000
-max_picks = 200
-n_samples = 1200000
-t_max = 120.0
-plot_seq = 0
-n_threads = 16
-n_rand_sta = 500
+bounds_scaler = 1
+limit_max_distance = True
+random_sta_locs = False
 
 def output_thread(out_q, params):
-    import h5py
-    print("Building hdf5 dataset")
-    f = h5py.File(params['hdf_file'], "w", libver='latest')
-    f.create_dataset("X", (n_samples, max_picks, 5), \
-                     dtype=np.float32)
-    f.create_dataset("Y", (n_samples, max_picks), \
-                     dtype=np.int16)
-    print("Finished building hdf5 dataset")
-
-    count = 0
     none_count = 0
+    X = []
+    Y = []
     while True:
         res = out_q.get()
         if res is None:
             none_count += 1
         else:
-            f['X'][count:count+n_chunk,:,:] = res[0]
-            f['Y'][count:count+n_chunk,:] = res[1]
-            print("chunk", count, "written")
-            count += n_chunk
+            X.append(res[0])
+            Y.append(res[1])
+            print(len(Y))
         if none_count == n_threads:
             break
-    f.close()
+    X = np.array(X)
+    Y = np.array(Y)
+
+    np.save(params["training_dset_X"], X)
+    np.save(params["training_dset_Y"], Y)
+
+    return
 
 def generate_phases(in_q, out_q, x_min, x_max, y_min, y_max, \
                     sncl_idx, stla, stlo, phasemap, tt_p, tt_s):
+
     np.random.seed()
 
     # Random phase station time generator
-    #n_sta = sncl_idx.size
-    n_sta = n_rand_sta
+    n_sta = sncl_idx.size
 
     while True:
-        chunk = []
         # Infinite loop until finished
         next_id = in_q.get()
         if next_id is None:
             out_q.put(None)
-            print("Job finished...exiting")
+            #print("Job finished...exiting")
             break
-        for k in range(n_chunk):
 
-            # Define random number of events in the window
-            n_eve = np.random.randint(0, 20)
+        # Random phase station time generator
+        n_sta = sncl_idx.size
 
-            # Generate random origin times
-            origin_times = np.random.uniform(0, 60, size=n_eve)
-            #origin_times = np.cumsum(origin_times)
+        # Define random number of events in the window
+        #n_eve = int(t_max/avg_t_sep)
+        n_eve = int(t_max/params['avg_eve_sep'])
 
-            # Define random number of fake picks in the window
-            #n_fake = np.random.randint(0, max_picks//10)
-            n_fake = 0
+        # Generate random origin times
+        origin_times = np.random.uniform(0, t_max, size=n_eve)
+        origin_times[0] = 0
 
-            phasemap = np.random.randint(0, 2, size=n_rand_sta)
-            stlo = np.random.uniform(x_min, x_max, size=n_rand_sta)
-            stla = np.random.uniform(y_min, y_max, size=n_rand_sta)
+        # Define random number of fake picks in the window
+        if random_sta_locs:
+            phasemap = np.random.randint(0, 2, size=n_sta)
+            stlo = np.random.uniform(x_min, x_max, size=n_sta)
+            stla = np.random.uniform(y_min, y_max, size=n_sta)
+        X = []
+        Y = []
+        R = []
 
-            feat_stlo = np.tile(stlo, n_eve)
-            feat_stla = np.tile(stla, n_eve)
-            label0 = np.ones(feat_stlo.size)
-            feat01 = np.array([])
-            feat02 = np.array([])
-            dists = np.array([])
-            for i in range(n_eve):
-                Y0 = np.random.uniform(bounds_scaler*y_min,
-                    bounds_scaler*y_max)
-                X0 = np.random.uniform(bounds_scaler*x_min,
-                    bounds_scaler*x_max)
-                Z0 = np.random.uniform(0, 25)
+        n_fake = params['n_fake']
+        if n_fake > 0:
 
-                # Calculate distances for all stations to source
-                dists0 = np.sqrt((X0-stlo)**2 + (Y0-stla)**2)
-
-                # Generate pick errors
-                dt = np.random.normal(0, 0.33, size=phasemap.size)
-
-                # Construct arrays for pick features, labels, and distances
-                idx = np.where(phasemap == 0)[0]
-                tt = np.zeros(dists0.size)
-                tt[idx] = tt_p.interp(dists0[idx], np.tile(Z0, idx.size))
-                feat02_0 = phasemap
-                idx = np.where(phasemap == 1)[0]
-                tt[idx] = tt_s.interp(dists0[idx], np.tile(Z0, idx.size))
-                tt += dt
-
-                feat01 = np.concatenate((feat01, tt)) if feat01.size else tt
-                feat02 = np.concatenate((feat02, feat02_0)) if feat02.size else feat02_0
-                dists = np.concatenate((dists, dists0)) if dists.size else dists0
-
-            if n_eve > 0:
-                feat01 += np.repeat(origin_times, n_sta)
-                label0 += np.repeat(np.arange(n_eve), n_sta)
-                max_dist = np.repeat(np.random.uniform(40, 150, size=n_eve), n_sta)
-
-                # Remove picks that are more than max_dist away
-                idx = np.where(dists <= max_dist)[0]
-                feat_stlo = feat_stlo[idx]
-                feat_stla = feat_stla[idx]
-                feat01 = feat01[idx]
-                feat02 = feat02[idx]
-                label0 = label0[idx]
-
-                # Randomly flip the phase type and label to 0
-                if True:
-                    retain_pr = np.random.uniform(0, 1, size=label0.size)
-                    idx = np.where(retain_pr < 0.10)[0]
-                    idx2 = np.where(feat02[idx] == 0)[0]
-                    idx3 = np.where(feat02[idx] == 1)[0]
-                    feat02[idx[idx2]] = 1
-                    feat02[idx[idx3]] = 0
-                    label0[idx] = 0
-
-                retain_pr = np.random.uniform(0, 1, size=label0.size)
-                idx = np.where(retain_pr >= 0.10)[0]
-                feat_stlo = feat_stlo[idx]
-                feat_stla = feat_stla[idx]
-                feat01 = feat01[idx]
-                feat02 = feat02[idx]
-                label0 = label0[idx]
-
-            feat0 = np.column_stack((feat_stlo, feat_stla, feat01, \
-                                     feat02, np.ones(feat01.size)))
-            # Fake picks
-            if feat0.shape[0] > 0:
-                feat0[:,2] -= np.min(feat0[:,2])
-                idx = np.random.choice(feat0.shape[0], size=n_fake)
-                fake_picks = np.random.uniform(0, t_max, size=n_fake)
-                fake_stlo = feat0[idx,0]
-                fake_stla = feat0[idx,1]
-                fake_pidx = np.random.choice([0, 1], size=n_fake)
-                fake_labels = np.zeros(n_fake)
+            if np.random.rand() < 0.5:
+                idx = np.ones(n_fake, dtype=np.int) * \
+                    np.random.choice(np.arange(stlo.size))
             else:
-                fake_picks = np.random.uniform(0, t_max, size=n_fake)
-                fake_sta = np.random.randint(0, n_sta, size=n_fake)
-                fake_stlo = stlo[fake_sta]
-                fake_stla = stla[fake_sta]
-                fake_pidx = phasemap[fake_sta]
-                fake_labels = np.zeros(n_fake)
-            fake_feat = np.column_stack((fake_stlo, fake_stla, fake_picks, \
-                                     fake_pidx, np.ones(fake_stlo.size)))
+                idx = np.random.choice(np.arange(stlo.size),
+                    size=n_fake,
+                    replace=True)
+            phase_labels = phasemap[idx]
+            lons = stlo[idx]
+            lats = stla[idx]
+            tt = np.random.uniform(0, t_max, size=n_fake)
+            X.append(np.column_stack((lons, lats, tt, phase_labels,
+                np.ones(lons.shape[0]))))
+            Y.append(np.zeros(lats.size))
+            R.append(np.zeros(lats.size))
 
-            feat1 = np.row_stack((feat0, fake_feat))
-            label1 = np.concatenate((label0, fake_labels))
-            if feat1.shape[0] > 0:
-                feat1[:,0] = (feat1[:,0] - x_min) / \
-                        (x_max - x_min)
-                feat1[:,1] = (feat1[:,1] - y_min) / \
-                        (y_max - y_min)
+        Y0 = np.random.uniform(bounds_scaler*y_min,
+            bounds_scaler*y_max)
+        X0 = np.random.uniform(bounds_scaler*x_min,
+            bounds_scaler*x_max)
+        Z0 = np.random.uniform(0, params['max_event_depth'])
 
-            idx = np.argsort(feat1[:,2])
-            feat1 = feat1[idx,:]
-            label1 = label1[idx]
+        for i in range(n_eve):
 
-            # Impose minimum time for picks
-            idx = np.where(feat1[:,2] >= 0)[0]
-            label1 = label1[idx]
-            feat1 = feat1[idx,:]
+            # Calculate distances for all stations to source
+            dists = np.sqrt((X0-stlo)**2 + (Y0-stla)**2)
 
-            # Impose maximum time for picks
-            idx = np.where(feat1[:,2] <= t_max)[0]
-            label1 = label1[idx]
-            feat1 = feat1[idx,:]
+            # Construct arrays for pick features, labels, and distances
+            idx = np.where(phasemap == 0)[0]
+            tt = np.zeros(dists.size)
+            tt[idx] = tt_p.interp(dists[idx], np.tile(Z0, idx.size))
+            phase_labels = phasemap
+            idx = np.where(phasemap == 1)[0]
+            tt[idx] = tt_s.interp(dists[idx], np.tile(Z0, idx.size))
 
-            feat1[:,2] /= t_max
+            # Generate pick errors
+            dt = params['max_pick_error']
+            tt += np.random.uniform(-dt, dt, size=phasemap.size)
 
-            # Check that the number of picks does not exceed the max allowed
-            if feat1.shape[0] >= max_picks:
-                label1 = label1[:max_picks]
-                feat1 = feat1[:max_picks,:]
-            else:
-                label1.resize(max_picks)
-                feat1_ = np.zeros((max_picks, 5))
-                feat1_[feat1.shape[0]:,2] = 0.0
-                feat1_[:feat1.shape[0], :] = feat1
-                feat1 = feat1_
+            idx = np.argsort(dists)
+            tt = tt[idx]
 
-            if True:
-                if label1[0] == 0:
-                    label1[:] = 0
-                    label1[0] = 1
-                else:
-                    idx1 = np.where(label1 == label1[0])[0]
-                    idx0 = np.where(label1 != label1[0])[0]
-                    label1[idx0] = 0
-                    label1[idx1] = 1
-            chunk.append((feat1, label1))
+            # Add back in origin time
+            tt += origin_times[i]
 
-        feat1 = np.array([x[0] for x in chunk])
-        label1 = np.array([x[1] for x in chunk])
+            phase_labels = phase_labels[idx]
+            dists = dists[idx]
+            lons = stlo[idx]
+            lats = stla[idx]
 
-        out_q.put((feat1, label1))
+            max_dist = np.random.uniform(params['min_hypo_dist'],
+                params['max_hypo_dist'])
+            idx = np.where(dists <= max_dist)[0]
+            tt = tt[idx]
+            phase_labels = phase_labels[idx]
+            dists = dists[idx]
+            lons = lons[idx]
+            lats = lats[idx]
+
+            X.append(np.column_stack((lons, lats, tt, phase_labels,
+                np.ones(lons.shape[0]))))
+            Y.append(np.ones(lats.size)*i+1)
+            R.append(dists)
+
+        if len(X) == 0:
+            continue
+
+        X = np.concatenate(X)
+        Y = np.concatenate(Y)
+        R = np.concatenate(R)
+
+        retain_pr = np.random.uniform(0, 1, size=Y.size)
+        idx = np.where(retain_pr < 0.50)[0]
+        X = X[idx,:]
+        Y = Y[idx]
+        R = R[idx]
+
+        if len(X) == 0:
+            continue
+
+        idx = np.argsort(X[:,2])
+        X = X[idx,:]
+        Y = Y[idx]
+        R = R[idx]
+
+        # Check that the number of picks does not exceed the max allowed
+        if X.shape[0] >= max_picks:
+            Y = Y[:max_picks]
+            X = X[:max_picks,:]
+            R = R[:max_picks]
+        else:
+            Y.resize(max_picks)
+            X_ = np.zeros((max_picks, 5))
+            X_[X.shape[0]:,2] = 0.0
+            X_[:X.shape[0], :] = X
+            X = X_
+
+        Y = Y.astype(np.int32)
+        labels = np.unique(Y)
+
+        X[:,0] = (X[:,0] - x_min) / (x_max - x_min)
+        X[:,1] = (X[:,1] - y_min) / (y_max - y_min)
+        X[:,2] /= t_max
+
+        if Y[0] == 0:
+            Y[:] = 0
+            Y[0] = 1
+        else:
+            idx1 = np.where(Y == Y[0])[0]
+            idx0 = np.where(Y != Y[0])[0]
+            Y[idx0] = 0
+            Y[idx1] = 1
+
+        out_q.put((X, Y))
 
 class tt_interp:
     def __init__(self, ttfile):
@@ -247,17 +225,7 @@ class tt_interp:
         return self.interp_.ev(depth, dist)
 
 
-if __name__ == "__main__":
-    from obspy.geodetics.base import gps2dist_azimuth
-    if len(sys.argv) != 2:
-        print("phaselink_dataset config_json")
-        sys.exit()
-
-    with open(sys.argv[1], "r") as f:
-        params = json.load(f)
-
-    print("Starting up...")
-    phase_idx = {'P': 0, 'S': 1}
+def get_network_centroid(params):
     stlo = []
     stla = []
     with open(params['station_file'], 'r') as f:
@@ -268,11 +236,12 @@ if __name__ == "__main__":
 
     lat0 = (np.max(stla) + np.min(stla))*0.5
     lon0 = (np.max(stlo) + np.min(stlo))*0.5
+    return lat0, lon0
 
+def build_station_map(params):
     stations = {}
     sncl_map = {}
     count = 0
-    print("Setting up initial coordinate frame")
     with open(params['station_file'], 'r') as f:
         for line in f:
             net, sta, lat, lon = line.split()
@@ -297,6 +266,28 @@ if __name__ == "__main__":
     phasemap = np.array([phase_idx[x[2]] for x in sncl_map])
     sncl_idx = np.array([sncl_map[x] for x in sncl_map])
 
+    return stlo, stla, phasemap, sncl_idx, stations, sncl_map
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        print("phaselink_dataset config_json")
+        sys.exit()
+
+    with open(sys.argv[1], "r") as f:
+        params = json.load(f)
+
+    max_picks = params['n_max_picks']
+    t_max = params['t_win']
+    n_threads = params['n_threads']
+
+    print("Starting up...")
+    phase_idx = {'P': 0, 'S': 1}
+
+    lat0, lon0 = get_network_centroid(params)
+    stlo, stla, phasemap, sncl_idx, stations, sncl_map = \
+        build_station_map(params)
+
     x_min = np.min(stlo)
     x_max = np.max(stlo)
     y_min = np.min(stla)
@@ -308,6 +299,7 @@ if __name__ == "__main__":
         Y0 = (Y0 - y_min) / (y_max - y_min)
         stations[key] = (X0, Y0)
 
+    # Save station maps for detect mode
     pickle.dump(stations, open(params['station_map_file'], 'wb'))
     pickle.dump(sncl_map, open(params['sncl_map_file'], 'wb'))
 
@@ -316,9 +308,9 @@ if __name__ == "__main__":
 
     tt_p = tt_interp(params['trav_time_p'])
     tt_s = tt_interp(params['trav_time_s'])
+
     proc = mp.Process(target=output_thread, args=(out_q, params))
     proc.start()
-
     procs = []
     for i in range(n_threads):
         print("Starting thread %d" % i)
@@ -328,7 +320,7 @@ if __name__ == "__main__":
         p.start()
         procs.append(p)
 
-    for i in range(n_samples//n_chunk):
+    for i in range(params['n_train_samp']):
         in_q.put(i)
 
     for i in range(n_threads):
