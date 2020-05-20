@@ -1,5 +1,4 @@
-#! /home/zross/bin python
-
+#!/home/zross/bin/python
 import numpy as np
 import multiprocessing as mp
 import pickle
@@ -27,6 +26,12 @@ def output_thread(out_q, params):
             break
     X = np.array(X)
     Y = np.array(Y)
+
+    ones = np.sum(Y)
+    zeros = np.size(Y) - ones
+    total = ones + zeros
+    print("Ones:", ones, 100*ones/total)
+    print("Zeros:", zeros, 100*zeros/total)
 
     np.save(params["training_dset_X"], X)
     np.save(params["training_dset_Y"], Y)
@@ -111,6 +116,13 @@ def generate_phases(in_q, out_q, x_min, x_max, y_min, y_max, \
             dt = params['max_pick_error']
             tt += np.random.uniform(-dt, dt, size=phasemap.size)
 
+            #dt = np.random.normal(size=phasemap.size)*0.05*tt
+            #idx = np.where(dt < 0.15)[0]
+            #dt[idx] = 0.15
+            #idx = np.where(dt > 1.50)[0]
+            #dt[idx] = 1.50
+            #tt += dt*tt
+
             idx = np.argsort(dists)
             tt = tt[idx]
 
@@ -157,6 +169,8 @@ def generate_phases(in_q, out_q, x_min, x_max, y_min, y_max, \
         Y = Y[idx]
         R = R[idx]
 
+        X[:,2] -= X[0,2]
+
         # Check that the number of picks does not exceed the max allowed
         if X.shape[0] >= max_picks:
             Y = Y[:max_picks]
@@ -188,7 +202,7 @@ def generate_phases(in_q, out_q, x_min, x_max, y_min, y_max, \
         out_q.put((X, Y))
 
 class tt_interp:
-    def __init__(self, ttfile):
+    def __init__(self, ttfile, datum):
         with open(ttfile, 'r') as f:
             count = 0
             for line in f:
@@ -217,12 +231,13 @@ class tt_interp:
         self.tt = tt
         self.dists = dists
         self.depths = depths
+        self.datum = datum
 
         from scipy.interpolate import RectBivariateSpline
         self.interp_ = RectBivariateSpline(self.depths, self.dists, self.tt)
 
     def interp(self, dist, depth):
-        return self.interp_.ev(depth, dist)
+        return self.interp_.ev(depth + self.datum, dist)
 
 
 def get_network_centroid(params):
@@ -306,8 +321,24 @@ if __name__ == "__main__":
     in_q = mp.Queue(1000000)
     out_q = mp.Queue(1000000)
 
-    tt_p = tt_interp(params['trav_time_p'])
-    tt_s = tt_interp(params['trav_time_s'])
+    # Pwaves
+    pTT = tt_interp(params['tt_table']['P'], params['datum'])
+    print('Read pTT')
+    print('(dep,dist) = (0,0), (10,0), (0,10), (10,0):')
+    print('             {:.3f}   {:.3f}   {:.3f}   {:.3f}'.format(
+	pTT.interp(0,0), pTT.interp(10,0),pTT.interp(0,10),
+	pTT.interp(10,10)))
+
+    #Swaves
+    sTT = tt_interp(params['tt_table']['S'], params['datum'])
+    print('Read sTT')
+    print('(dep,dist) = (0,0), (10,0), (0,10), (10,0):')
+    print('             {:.3f}   {:.3f}   {:.3f}   {:.3f}'.format(
+	sTT.interp(0,0), sTT.interp(10,0),sTT.interp(0,10),
+	sTT.interp(10,10)))
+
+    #pTT = tt_interp(params['trav_time_p'])
+    #sTT = tt_interp(params['trav_time_s'])
 
     proc = mp.Process(target=output_thread, args=(out_q, params))
     proc.start()
@@ -316,7 +347,7 @@ if __name__ == "__main__":
         print("Starting thread %d" % i)
         p = mp.Process(target=generate_phases, \
             args=(in_q, out_q, x_min, x_max, y_min, y_max, \
-                  sncl_idx, stla, stlo, phasemap, tt_p, tt_s))
+                  sncl_idx, stla, stlo, phasemap, pTT, sTT))
         p.start()
         procs.append(p)
 
@@ -325,6 +356,6 @@ if __name__ == "__main__":
 
     for i in range(n_threads):
         in_q.put(None)
-    for p in procs:
-        p.join()
-    proc.join()
+    #for p in procs:
+    #    p.join()
+    #proc.join()

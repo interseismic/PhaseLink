@@ -1,4 +1,4 @@
-#! /bin/env python
+#!/home/zross/bin/python
 import numpy as np
 import os
 import torch
@@ -6,14 +6,16 @@ import torch.utils.data
 import sys
 import json
 import pickle
-import apex.amp as amp
 
-n_epochs = 20
+n_epochs = 100
+enable_amp = True
+if enable_amp:
+    import apex.amp as amp
 
 class MyDataset(torch.utils.data.Dataset):
     def __init__(self, data, target, transform=None):
-        self.data = torch.from_numpy(data).float()
-        self.target = torch.from_numpy(target).long()
+        self.data = torch.from_numpy(data).float().to(device)
+        self.target = torch.from_numpy(target).short().to(device)
         self.transform = transform
 
     def __getitem__(self, index):
@@ -35,13 +37,13 @@ class StackedGRU(torch.nn.Module):
         self.fc1 = torch.nn.Linear(5, 32)
         self.fc2 = torch.nn.Linear(32, 32)
         self.fc3 = torch.nn.Linear(32, 32)
-        self.fc4 = torch.nn.Linear(2*128, 1)
+        self.fc4 = torch.nn.Linear(32, 32)
+        self.fc5 = torch.nn.Linear(32, 32)
+        self.fc6 = torch.nn.Linear(2*self.hidden_size, 1)
         self.gru1 = torch.nn.GRU(32, self.hidden_size, \
             batch_first=True, bidirectional=True)
         self.gru2 = torch.nn.GRU(self.hidden_size*2, self.hidden_size, \
             batch_first=True, bidirectional=True)
-        #self.sigmoid = torch.nn.Sigmoid()
-        #self.dropout = torch.nn.Dropout(p=0.25)
 
     def forward(self, inp):
         out = self.fc1(inp)
@@ -50,12 +52,16 @@ class StackedGRU(torch.nn.Module):
         out = torch.nn.functional.relu(out)
         out = self.fc3(out)
         out = torch.nn.functional.relu(out)
+        out = self.fc4(out)
+        out = torch.nn.functional.relu(out)
+        out = self.fc5(out)
+        out = torch.nn.functional.relu(out)
         out = self.gru1(out)
         h_t = out[0]
         out = self.gru2(h_t)
         h_t = out[0]
-        out = self.fc4(h_t)
-        #out = self.sigmoid(out)
+        out = self.fc6(h_t)
+        #out = torch.sigmoid(out)
         return out
 
 class Model():
@@ -68,8 +74,10 @@ class Model():
         from torch.autograd import Variable
         import time
 
-        #loss = torch.nn.BCELoss()
+        #pos_weight = torch.ones([1]).to(device)*24.264966334432359
+        #loss = torch.nn.BCEWithLogitsLoss(pos_weight=pos_weight)
         loss = torch.nn.BCEWithLogitsLoss()
+        #loss = torch.nn.BCELoss()
         n_batches = len(train_loader)
         training_start_time = time.time()
 
@@ -87,8 +95,8 @@ class Model():
             for i, data in enumerate(train_loader, 0):
                 # Get inputs/outputs and wrap in variable object
                 inputs, labels = data
-                inputs = inputs.to(device)
-                labels = labels.to(device)
+                #inputs = inputs.to(device)
+                #labels = labels.to(device)
 
                 # Set gradients for all parameters to zero
                 self.optimizer.zero_grad()
@@ -98,12 +106,16 @@ class Model():
 
                 # Backward pass
                 outputs = outputs.view(-1)
+
                 labels = labels.view(-1)
-                loss_value = loss(outputs, labels.float())
-                #loss_ = loss(outputs, labels.float())
-                #with amp.scale_loss(loss_, optimizer) as loss_value:
-                #    loss_value.backward()
-                loss_value.backward()
+
+                if enable_amp:
+                    loss_ = loss(outputs, labels.float())
+                    with amp.scale_loss(loss_, optimizer) as loss_value:
+                        loss_value.backward()
+                else:
+                    loss_value = loss(outputs, labels.float())
+                    loss_value.backward()
 
                 # Update parameters
                 self.optimizer.step()
@@ -114,7 +126,7 @@ class Model():
                     total_train_loss += loss_value.data.item()
 
                     # Calculate categorical accuracy
-                    pred = torch.round(torch.sigmoid(outputs)).long()
+                    pred = torch.round(torch.sigmoid(outputs)).short()
 
                     running_acc += (pred == labels).sum().item()
                     running_sample_count += len(labels)
@@ -134,32 +146,69 @@ class Model():
 
             running_sample_count = 0
             y_pred_all, y_true_all = [], []
+
+            prec_0 = 0
+            prec_n_0 = 0
+            prec_1 = 0
+            prec_n_1 = 0
+            reca_0 = 0
+            reca_n_0 = 0
+            reca_1 = 0
+            reca_n_1 = 0
+            pick_precision = 0
+            pick_recall = 0
+
             with torch.no_grad():
                 for inputs, labels in val_loader:
                     # Wrap tensors in Variables
-                    inputs = inputs.to(device)
-                    labels = labels.to(device)
+                    #inputs = inputs.to(device)
+                    #labels = labels.to(device)
 
                     # Forward pass only
-                    val_outputs = torch.sigmoid(self.network(inputs))
+                    val_outputs = self.network(inputs)
                     val_outputs = val_outputs.view(-1)
                     labels = labels.view(-1)
                     val_loss = loss(val_outputs, labels.float())
                     total_val_loss += val_loss.data.item()
 
                     # Calculate categorical accuracy
-                    pred = torch.round(val_outputs).long()
-                    running_val_acc += (pred == labels).sum().item()
+                    y_pred = torch.round(torch.sigmoid(val_outputs)).short()
+                    running_val_acc += (y_pred == labels).sum().item()
                     running_sample_count += len(labels)
 
-                    y_pred_all.append(pred.cpu().numpy().flatten())
-                    y_true_all.append(labels.cpu().numpy().flatten())
+                    #y_pred_all.append(pred.cpu().numpy().flatten())
+                    #y_true_all.append(labels.cpu().numpy().flatten())
 
-            y_pred_all = np.concatenate(y_pred_all)
-            y_true_all = np.concatenate(y_true_all)
+                    y_true = labels
 
-            from sklearn.metrics import classification_report
-            print(classification_report(y_true_all, y_pred_all))
+                    prec_0 += (
+                        y_pred[y_pred<0.5] == y_true[y_pred<0.5]
+                    ).sum().item()
+                    prec_1 += (
+                        y_pred[y_pred>0.5] == y_true[y_pred>0.5]
+                    ).sum().item()
+                    reca_0 += (
+                        y_pred[y_true<0.5] == y_true[y_true<0.5]
+                    ).sum().item()
+                    reca_1 += (
+                        y_pred[y_true>0.5] == y_true[y_true>0.5]
+                    ).sum().item()
+
+                    prec_n_0 += torch.numel(y_pred[y_pred<0.5])
+                    prec_n_1 += torch.numel(y_pred[y_pred>0.5])
+                    reca_n_0 += torch.numel(y_true[y_true<0.5])
+                    reca_n_1 += torch.numel(y_true[y_true>0.5])
+
+            print("Precision (Class 0): {:4.3f}%".format(prec_0/prec_n_0))
+            print("Recall (Class 0): {:4.3f}%".format(reca_0/reca_n_0))
+            print("Precision (Class 1): {:4.3f}%".format(prec_1/prec_n_1))
+            print("Recall (Class 1): {:4.3f}%".format(reca_1/reca_n_1))
+
+            #y_pred_all = np.concatenate(y_pred_all)
+            #y_true_all = np.concatenate(y_true_all)
+
+            #from sklearn.metrics import classification_report
+            #print(classification_report(y_true_all, y_pred_all))
 
             total_val_loss /= len(val_loader)
             total_val_acc = running_val_acc / running_sample_count
@@ -205,12 +254,14 @@ if __name__ == "__main__":
 
     device = torch.device(params["device"])
 
+    torch.cuda.empty_cache()
+
     X = np.load(params["training_dset_X"])
     Y = np.load(params["training_dset_Y"])
     print(X.shape, Y.shape)
 
-    print(np.where(Y==1)[0].size, "1 labels")
-    print(np.where(Y==0)[0].size, "0 labels")
+    #print(np.where(Y==1)[0].size, "1 labels")
+    #print(np.where(Y==0)[0].size, "0 labels")
 
     dataset = MyDataset(X, Y)
 
@@ -234,7 +285,7 @@ if __name__ == "__main__":
     )
     val_loader = torch.utils.data.DataLoader(
         dataset,
-        batch_size=256,
+        batch_size=1024,
         shuffle=False,
         sampler=validation_sampler
     )
@@ -243,11 +294,17 @@ if __name__ == "__main__":
     stackedgru = stackedgru.to(device)
     #stackedgru = torch.nn.DataParallel(stackedgru,
     #    device_ids=['cuda:2', 'cuda:3', 'cuda:4', 'cuda:5'])
-    optimizer = torch.optim.Adam(stackedgru.parameters())
 
-    #stackedgru, optimizer = amp.initialize(stackedgru, optimizer,
-    #    opt_level='O1')
+    if enable_amp:
+        #amp.register_float_function(torch, 'sigmoid')
+        from apex.optimizers import FusedAdam
+        optimizer = FusedAdam(stackedgru.parameters())
+        stackedgru, optimizer = amp.initialize(
+            stackedgru, optimizer, opt_level='O2')
+    else:
+        optimizer = torch.optim.Adam(stackedgru.parameters())
 
     model = Model(stackedgru, optimizer, \
-        model_path='./models_saved/')
+        model_path='./phaselink_model/')
+    print("Begin training process.")
     model.train(train_loader, val_loader, n_epochs)
