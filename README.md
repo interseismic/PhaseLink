@@ -4,6 +4,10 @@ This code accompanies the paper
 ```
 Ross, Z. E., Yue, Y., Meier, M.‐A., Hauksson, E., & Heaton, T. H. ( 2019). PhaseLink: A deep learning approach to seismic phase association. Journal of Geophysical Research: Solid Earth, 124, 856– 869. https://doi.org/10.1029/2018JB016674 [arXiv:1809.02880]
 ```
+
+Please see the PDF user manual first: GPD_Phaselink_guide_20210331.pdf
+
+Quick overview of codes:
 There are four scripts that should be used in the following order:
 1) phaselink_dataset.py : Build a training dataset from a station file and 1D travel time table. The travel time tables are in the format that is output by the GrowClust code. A decoupled version of this raytracer is provided in raytracer.tar.gz, which has a python wrapper to the F90 routine.
 
