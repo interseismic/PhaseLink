@@ -343,7 +343,8 @@ def run_phaselink(X, labels, trig_pr, params, ofile, tt_p, tt_s,
                 phases[(net, sta, phase)].append((idx, trig_pr[idx]))
         for key in phases:
             if len(phases[key]) > 1:
-                sorted(phases[key], key=lambda x: x[1])
+                #sorted(phases[key], key=lambda x: x[1])
+                phases[key].sort(key=lambda x: x[1]) # sort by the pr and keep the result
                 phases[key] = [phases[key][-1]]
         clusters[i] = [phases[key][0][0] for key in phases]
     clusters = [x for x in clusters if len(x) >= params['n_min_det']]
